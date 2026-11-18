@@ -68,9 +68,14 @@ function recordAllSheets() {
     var sheets = ctx.workbook.worksheets;
     sheets.load("items/id");
     await ctx.sync();
+    var fix = [];
     for (var i = 0; i < sheets.items.length; i++) {
-      await recordState(ctx, sheets.items[i], sheets.items[i].id);
+      var data = await recordState(ctx, sheets.items[i], sheets.items[i].id);
+      if (needsFix(data)) fix.push(sheets.items[i].id);
     }
+    return fix;
+  }).then(async function (fix) {
+    for (var i = 0; i < fix.length; i++) await autoSync(fix[i]);
   });
 }
 
@@ -114,6 +119,16 @@ async function readSheet(ctx, ws) {
   var used = ws.getUsedRangeOrNullObject(true);
   used.load("values,formulas,rowIndex,columnIndex");
   await ctx.sync();
+  if (!legend && !used.isNullObject) {
+    // No named legend: adopt a "Tick Mark Legend" block already on the sheet.
+    var found = TickCore.findLegendBlock(used.values, used.rowIndex, used.columnIndex);
+    if (found) {
+      var vals = used.values.slice(found.rowIndex - used.rowIndex, found.rowIndex - used.rowIndex + found.rowCount)
+        .map(function (row) { return row.slice(found.columnIndex - used.columnIndex, found.columnIndex - used.columnIndex + 2); });
+      legend = { entries: TickCore.parseLegend(vals), box: found, adopted: true };
+      legend.entries.forEach(function (e) { e.row = found.rowIndex + e.offset; });
+    }
+  }
   if (!used.isNullObject) {
     var entryRows = {};
     if (legend) legend.entries.forEach(function (e) { entryRows[e.row] = e.letter; });
@@ -150,6 +165,15 @@ async function recordState(ctx, ws, id) {
     ? { letters: data.legend.entries.map(function (e) { return e.letter; }), counts: data.counts }
     : null;
   return data;
+}
+
+/* Something on the sheet should be tidied even if no letters change. */
+function needsFix(data) {
+  if (!data.legend) return false;
+  var inLegend = {};
+  data.legend.entries.forEach(function (e) { inLegend[e.letter] = true; });
+  return data.legend.adopted || data.broken.length > 0 || legendUntidy(data.legend) ||
+    data.ticks.some(function (t) { return (t.formula && !t.styled) || (!t.formula && inLegend[t.letter]); });
 }
 
 /* True if the legend has gaps, a missing header or stray rows and should be rewritten. */
@@ -193,6 +217,9 @@ function applyChanges(ws, data, plan, legendPos) {
         if (!t.styled) cell.style = STYLE_TICK;
         cell.formulas = [[TickCore.refFormula(newRow[nl], legendPos.col)]];
       }
+    } else if (legendPos) {
+      // Older plain-letter tick mark: turn it into a formula pointing at the legend.
+      cell.formulas = [[TickCore.refFormula(newRow[nl], legendPos.col)]];
     } else if (nl !== t.letter) {
       cell.values = [[TickCore.withCase(nl, t.lower)]];
     }
@@ -312,9 +339,7 @@ function autoSync(id) {
 
     var ap = TickCore.autoPlan(entries, data.counts, prev);
     var plan = TickCore.buildPlan(entries, ap.kept, ap.deleted);
-    var needsFix = data.broken.length > 0 || legendUntidy(data.legend) ||
-      data.ticks.some(function (t) { return t.formula && !t.styled; });
-    if (plan.changed || needsFix) {
+    if (plan.changed || needsFix(data)) {
       if (TickCore.orphanCollision(data.ticks, plan.mapping).length) {
         showStatus("Tick marks need re-lettering, but some tick cells use letters that aren't in the legend. Open Tick Marks to fix.", "warn");
       } else {

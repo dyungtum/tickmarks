@@ -339,6 +339,24 @@
     return out;
   }
 
+  /**
+   * Find a legend the add-in doesn't have a name for (made by an older version, typed by hand,
+   * or copied in): a cell reading "Tick Mark Legend" with letter + description rows under it.
+   * Returns the legend box or null.
+   */
+  function findLegendBlock(values, rowIndex, columnIndex) {
+    for (var r = 0; r < values.length; r++) {
+      for (var c = 0; c < values[r].length; c++) {
+        var v = values[r][c];
+        if (typeof v !== "string" || v.trim().toLowerCase() !== "tick mark legend") continue;
+        var n = 0;
+        while (r + 1 + n < values.length && isTickText(values[r + 1 + n][c])) n++;
+        return { rowIndex: rowIndex + r, columnIndex: columnIndex + c, rowCount: 1 + n, columnCount: 2 };
+      }
+    }
+    return null;
+  }
+
   /** "A1"-style address from zero-based indexes. */
   function cellAddress(row, col) {
     return letterFor(col) + (row + 1);
@@ -364,6 +382,7 @@
     parseRef: parseRef,
     refFormula: refFormula,
     classifyCells: classifyCells,
+    findLegendBlock: findLegendBlock,
     withCase: withCase,
     findReferences: findReferences,
     remapReferences: remapReferences,
