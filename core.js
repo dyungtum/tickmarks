@@ -325,7 +325,8 @@
           if (ref && legendBox && ref.col === legendBox.columnIndex &&
               ref.row > legendBox.rowIndex && ref.row < legendBox.rowIndex + legendBox.rowCount) {
             var L = entryRows[ref.row];
-            if (L) out.formulaTicks.push({ row: row, col: col, letter: L, refRow: ref.row, formula: true });
+            // asText: the cell is formatted as Text, so Excel shows "=$B$19" instead of the letter
+            if (L) out.formulaTicks.push({ row: row, col: col, letter: L, refRow: ref.row, formula: true, asText: v === f });
             else out.blankRefs.push({ row: row, col: col });
           }
           continue;

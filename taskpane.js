@@ -174,7 +174,7 @@ function needsFix(data) {
   var inLegend = {};
   data.legend.entries.forEach(function (e) { inLegend[e.letter] = true; });
   return data.legend.adopted || data.broken.length > 0 || legendUntidy(data.legend) ||
-    data.ticks.some(function (t) { return (t.formula && !t.styled) || (!t.formula && inLegend[t.letter]); });
+    data.ticks.some(function (t) { return (t.formula && (!t.styled || t.asText)) || (!t.formula && inLegend[t.letter]); });
 }
 
 /* True if the legend has gaps, a missing header or stray rows and should be rewritten. */
@@ -195,7 +195,13 @@ async function ensureStyle(ctx) {
     s.font.color = TICK_COLOR;
     s.font.bold = true;
     s.horizontalAlignment = "Center";
+    s.numberFormat = "General";
     await ctx.sync();
+  } else {
+    // A Text number format would make tick mark formulas show as "=$B$19".
+    st.load("numberFormat");
+    await ctx.sync();
+    if (st.numberFormat !== "General") { st.numberFormat = "General"; await ctx.sync(); }
   }
 }
 
@@ -214,12 +220,14 @@ function applyChanges(ws, data, plan, legendPos) {
     var cell = ws.getCell(t.row, t.col);
     if (nl === null) { cell.clear(Excel.ClearApplyTo.contents); return; }
     if (t.formula) {
-      if (newRow[nl] !== t.refRow || !t.styled) {
+      if (newRow[nl] !== t.refRow || !t.styled || t.asText) {
         if (!t.styled) cell.style = STYLE_TICK;
+        cell.numberFormat = [["General"]];
         cell.formulas = [[TickCore.refFormula(newRow[nl], legendPos.col)]];
       }
     } else if (legendPos) {
       // Older plain-letter tick mark: turn it into a formula pointing at the legend.
+      cell.numberFormat = [["General"]];
       cell.formulas = [[TickCore.refFormula(newRow[nl], legendPos.col)]];
     } else if (nl !== t.letter) {
       cell.values = [[TickCore.withCase(nl, t.lower)]];
@@ -293,8 +301,13 @@ async function writeLegend(ctx, ws, oldBox, entries, pos) {
   var old = ws.names.getItemOrNullObject(LEGEND_NAME);
   await ctx.sync();
   if (!old.isNullObject) { old.delete(); await ctx.sync(); }
-  ws.names.add(LEGEND_NAME, block, "Tick Mark Manager legend - do not delete");
-  await ctx.sync();
+  try {
+    ws.names.add(LEGEND_NAME, block, "Tick Mark Manager legend - do not delete");
+    await ctx.sync();
+  } catch (e) {
+    // Not fatal: the add-in also finds the legend by its "Tick Mark Legend" heading.
+    console.warn("Could not name the legend range", e);
+  }
   return { row: row, col: col };
 }
 
@@ -405,7 +418,9 @@ function fillAreas(areas, formula) {
       for (var c = 0; c < a.columnCount; c++) row.push(formula);
       f.push(row);
     }
+    var nf = f.map(function (row) { return row.map(function () { return "General"; }); });
     a.style = STYLE_TICK;
+    a.numberFormat = nf;
     a.formulas = f;
   });
 }
