@@ -407,6 +407,17 @@
     return null;
   }
 
+  /** "B2" or "B2:D5" (optionally "Sheet!B2") -> {rowIndex, columnIndex, rowCount, columnCount}; else null. */
+  function parseA1Range(addr) {
+    if (typeof addr !== "string") return null;
+    var a = addr.split("!").pop().replace(/\$/g, "");
+    var m = /^([A-Za-z]{1,3})(\d+)(?::([A-Za-z]{1,3})(\d+))?$/.exec(a);
+    if (!m) return null;
+    var r1 = parseInt(m[2], 10) - 1, c1 = colIndex(m[1]);
+    var r2 = m[4] ? parseInt(m[4], 10) - 1 : r1, c2 = m[3] ? colIndex(m[3]) : c1;
+    return { rowIndex: Math.min(r1, r2), columnIndex: Math.min(c1, c2), rowCount: Math.abs(r2 - r1) + 1, columnCount: Math.abs(c2 - c1) + 1 };
+  }
+
   /** "A1"-style address from zero-based indexes. */
   function cellAddress(row, col) {
     return letterFor(col) + (row + 1);
@@ -432,6 +443,7 @@
     parseRef: parseRef,
     refFormula: refFormula,
     classifyCells: classifyCells,
+    parseA1Range: parseA1Range,
     findLegendBlock: findLegendBlock,
     withCase: withCase,
     findReferences: findReferences,

@@ -15,9 +15,14 @@ var TICK_COLOR = "#C00000";
 var MAX_FILL = 5000;
 var DEBOUNCE_MS = 700;
 var DELETED_FILL = "#FFFF00";
+// Mentions in text use this red. It is one step off the tick mark red (#C00000), which looks the same
+// but lets the add-in tell its own formatting apart from red text someone typed.
+var MENTION_COLOR = "#C00001";
+var MAX_EDIT_CELLS = 200;
 
 var state = {};     // worksheetId -> { letters: [...], counts: {...} } from the last time we looked
 var timers = {};
+var edited = {};    // worksheetId -> addresses changed since the last automatic pass
 var chain = Promise.resolve();
 
 function UserError(msg) { this.message = msg; this.isUser = true; }
@@ -83,9 +88,12 @@ function recordAllSheets() {
 function onSheetChanged(evt) {
   if (evt.source && evt.source !== Excel.EventSource.local) return Promise.resolve();
   var id = evt.worksheetId;
+  if (evt.address) (edited[id] = edited[id] || []).push(evt.address);
   clearTimeout(timers[id]);
   timers[id] = setTimeout(function () {
-    enqueue(function () { return autoOn() ? autoSync(id) : null; })
+    var addrs = edited[id] || [];
+    edited[id] = [];
+    enqueue(function () { return autoOn() ? autoSync(id, addrs) : null; })
       .then(function () { return enqueue(refreshUi); })
       .catch(showError);
   }, DEBOUNCE_MS);
@@ -242,48 +250,77 @@ function applyChanges(ws, data, plan, legendPos) {
  *  - show each mention in bold red, the rest of the text unchanged (needs ExcelApi 1.18)
  * Returns how many cells had their text changed.
  */
-async function updateMentions(ctx, ws, refCells, mapping, letters) {
+async function updateMentions(ctx, ws, refCells, mapping, letters, extraCells) {
   var known = {};
   letters.forEach(function (l) { known[l] = true; });
   var isKnown = function (l) { return !!known[l]; };
   var rich = Office.context.requirements.isSetSupported("ExcelApi", "1.18");
-  var items = [];
+
+  // Cells to look at: every cell whose text might mention a tick mark, plus cells just edited
+  // (an edit can turn a mention into plain text that still carries the bold red).
+  var items = [], seen = {};
   refCells.forEach(function (rc) {
-    var r = mapping ? TickCore.remapReferences(rc.text, mapping) : { text: rc.text, changed: false, deleted: false };
-    var spans = TickCore.referenceSpans(r.text, isKnown);
-    if (!r.changed && !spans.length) return;
-    items.push({ r: r, spans: spans, cell: ws.getCell(rc.row, rc.col) });
+    seen[rc.row + "," + rc.col] = true;
+    items.push({ text: rc.text, cell: ws.getCell(rc.row, rc.col), legacy: true });
+  });
+  var extras = (extraCells || []).filter(function (x) { return !seen[x.row + "," + x.col]; }).map(function (x) {
+    var cell = ws.getCell(x.row, x.col);
+    cell.load("values,formulas");
+    return { cell: cell, extra: true };
+  });
+  if (extras.length) {
+    await ctx.sync();
+    extras.forEach(function (x) {
+      var v = x.cell.values[0][0], f = x.cell.formulas[0][0];
+      if (typeof v === "string" && v !== "" && !(typeof f === "string" && f.charAt(0) === "=")) items.push({ text: v, cell: x.cell });
+    });
+  }
+  items.forEach(function (it) {
+    it.r = mapping ? TickCore.remapReferences(it.text, mapping) : { text: it.text, changed: false, deleted: false };
+    it.spans = TickCore.referenceSpans(it.r.text, isKnown);
   });
   if (!items.length) return 0;
+
   if (rich) {
-    items.forEach(function (it) {
-      if (it.spans.length) it.props = it.cell.getCellProperties({ textRuns: true, format: { font: { bold: true, color: true } } });
-    });
+    items.forEach(function (it) { it.props = it.cell.getCellProperties({ textRuns: true, format: { font: { bold: true, color: true } } }); });
     await ctx.sync();
   }
   var n = 0;
   items.forEach(function (it) {
     if (it.r.deleted) it.cell.format.fill.color = DELETED_FILL;
     if (it.r.changed) n++;
-    if (rich && it.spans.length) {
-      var cur = it.props.value[0][0];
-      var want = TickCore.textRuns(it.r.text, it.spans);
-      if (!it.r.changed && runsMatch(cur.textRuns, want)) return;
-      var base = plainFont(cur);
-      it.cell.setCellProperties([[{
-        textRuns: want.map(function (w) {
-          return { text: w.text, font: w.ref ? { bold: true, color: TICK_COLOR } : base };
-        })
-      }]]);
-    } else if (it.r.changed) {
-      it.cell.values = [[it.r.text]];
+    if (!rich) {
+      if (it.r.changed) it.cell.values = [[it.r.text]];
+      return;
     }
+    var cur = it.props.value[0][0];
+    var marked = hasMentionFormat(cur, it.legacy);
+    if (!it.spans.length && !marked && !it.r.changed) return; // ordinary text, never touched
+    var want = TickCore.textRuns(it.r.text, it.spans);
+    if (!it.r.changed && runsMatch(cur.textRuns, want)) return;
+    var base = plainFont(cur);
+    it.cell.setCellProperties([[{
+      textRuns: want.map(function (w) {
+        return { text: w.text, font: w.ref ? { bold: true, color: MENTION_COLOR } : base };
+      })
+    }]]);
   });
   return n;
 }
 
+/* Does any part of the cell carry the add-in's mention formatting? */
+function hasMentionFormat(cur, legacy) {
+  var test = function (f) {
+    // legacy: the first release used the tick mark red (#C00000) for mentions; accept it in text
+    // that talks about tick marks so those cells get cleaned up too.
+    return isRefFont(f) || (legacy && f && f.bold && typeof f.color === "string" && f.color.toUpperCase() === TICK_COLOR);
+  };
+  if (cur.format && test(cur.format.font)) return true;
+  return (cur.textRuns || []).some(function (r) { return test(r.font); });
+}
+
 function isRefFont(f) {
-  return !!(f && f.bold && typeof f.color === "string" && f.color.toUpperCase() === TICK_COLOR);
+  return !!(f && f.bold && typeof f.color === "string" && f.color.toUpperCase() === MENTION_COLOR);
 }
 
 /* Does the cell already show exactly these mentions in bold red? */
@@ -400,14 +437,32 @@ async function applyOrder(ctx, ws, data, kept, deleted) {
 
 /* --------------------------------------------------------- automatic mode */
 
-function autoSync(id) {
+/* Cells (row/col) inside the edited addresses, capped so a big paste stays fast. */
+function editedCells(addrs) {
+  var out = [], seen = {};
+  (addrs || []).forEach(function (a) {
+    var box = TickCore.parseA1Range(a);
+    if (!box || box.rowCount * box.columnCount > MAX_EDIT_CELLS) return;
+    for (var r = 0; r < box.rowCount; r++) for (var c = 0; c < box.columnCount; c++) {
+      var k = (box.rowIndex + r) + "," + (box.columnIndex + c);
+      if (!seen[k] && out.length < MAX_EDIT_CELLS) { seen[k] = true; out.push({ row: box.rowIndex + r, col: box.columnIndex + c }); }
+    }
+  });
+  return out;
+}
+
+function autoSync(id, addrs) {
   return Excel.run(async function (ctx) {
     var ws = ctx.workbook.worksheets.getItemOrNullObject(id);
     await ctx.sync();
     if (ws.isNullObject) return;
     var prev = state[id] || null;
     var data = await readSheet(ctx, ws);
-    if (!data.legend) { state[id] = null; return; }
+    if (!data.legend) {
+      state[id] = null;
+      await updateMentions(ctx, ws, data.refCells, null, [], editedCells(addrs)); // clear stale highlighting
+      return;
+    }
 
     var entries = data.legend.entries;
     if (prev && prev.letters.length && !entries.length) {
@@ -426,7 +481,7 @@ function autoSync(id) {
         await ensureStyle(ctx);
         var pos = legendPosOf(data);
         applyChanges(ws, data, plan, pos);
-        var nRefs = await updateMentions(ctx, ws, data.refCells, plan.mapping, plan.newEntries.map(function (e) { return e.letter; }));
+        var nRefs = await updateMentions(ctx, ws, data.refCells, plan.mapping, plan.newEntries.map(function (e) { return e.letter; }), editedCells(addrs));
         await writeLegend(ctx, ws, data.legend.box, plan.newEntries, pos);
         if (plan.changed) {
           var removed = entries.filter(function (e) { return plan.mapping[e.letter] === null; }).map(function (e) { return e.letter; });
@@ -439,7 +494,7 @@ function autoSync(id) {
     }
     else {
       // Nothing to re-letter: just make sure every mention is bold red (e.g. one just typed).
-      await updateMentions(ctx, ws, data.refCells, null, entries.map(function (e) { return e.letter; }));
+      await updateMentions(ctx, ws, data.refCells, null, entries.map(function (e) { return e.letter; }), editedCells(addrs));
     }
     await recordState(ctx, ws, id);
   });
