@@ -14,7 +14,9 @@ var LEGEND_HEADER = "Tick Mark Legend";
 var TICK_COLOR = "#C00000";
 var MAX_FILL = 5000;
 var DEBOUNCE_MS = 700;
-var DELETED_FILL = "#FFFF00";
+// Yellow for text that mentions a deleted tick mark. One step off Excel's standard yellow (#FFFF00)
+// so the add-in can remove its own highlight once the text is fixed, without touching other yellow cells.
+var DELETED_FILL = "#FFFF01";
 // Mentions in text use this red. It is one step off the tick mark red (#C00000), which looks the same
 // but lets the add-in tell its own formatting apart from red text someone typed.
 var MENTION_COLOR = "#C00001";
@@ -282,7 +284,7 @@ async function updateMentions(ctx, ws, refCells, mapping, letters, extraCells) {
   if (!items.length) return 0;
 
   if (rich) {
-    items.forEach(function (it) { it.props = it.cell.getCellProperties({ textRuns: true, format: { font: { bold: true, color: true } } }); });
+    items.forEach(function (it) { it.props = it.cell.getCellProperties({ textRuns: true, format: { font: { bold: true, color: true }, fill: { color: true } } }); });
     await ctx.sync();
   }
   var n = 0;
@@ -294,6 +296,9 @@ async function updateMentions(ctx, ws, refCells, mapping, letters, extraCells) {
       return;
     }
     var cur = it.props.value[0][0];
+    // Text fixed: take away the yellow the add-in put there.
+    var fill = cur.format && cur.format.fill && typeof cur.format.fill.color === "string" ? cur.format.fill.color.toUpperCase() : "";
+    if ((fill === DELETED_FILL || (it.legacy && fill === "#FFFF00")) && !/\[deleted\]/i.test(it.r.text)) it.cell.format.fill.clear();
     var marked = hasMentionFormat(cur, it.legacy);
     if (!it.spans.length && !marked && !it.r.changed) return; // ordinary text, never touched
     var want = TickCore.textRuns(it.r.text, it.spans);
@@ -784,18 +789,186 @@ function wireUi() {
   };
 }
 
+/* ------------------------------------------------------- needs attention */
+
+var IGNORE_KEY = "tm.ignored";
+
+function ignoredList() {
+  try {
+    var s = Office.context.document.settings;
+    var v = s && s.get(IGNORE_KEY);
+    return Array.isArray(v) ? v : [];
+  } catch (e) { return []; }
+}
+
+function ignoreIssue(issue) {
+  try {
+    var s = Office.context.document.settings;
+    var list = ignoredList();
+    list.push(issue.key);
+    s.set(IGNORE_KEY, list.slice(-500));
+    s.saveAsync(function () {});
+  } catch (e) { /* settings unavailable: nothing to persist */ }
+  return enqueue(refreshUi).catch(showError);
+}
+
+function snippet(text) {
+  text = String(text).replace(/\s+/g, " ");
+  return text.length > 70 ? text.slice(0, 67) + "…" : text;
+}
+
+/* Everything on one sheet that probably needs a person to look at it. */
+function computeIssues(data, sheet) {
+  var out = [];
+  var entries = data.legend ? data.legend.entries : [];
+  var known = {};
+  entries.forEach(function (e) { known[e.letter] = true; });
+  var isKnown = function (l) { return !!known[l]; };
+  var where = function (row, col) { return { sheetId: sheet.id, sheetName: sheet.name, row: row, col: col, addr: TickCore.cellAddress(row, col) }; };
+  var make = function (kind, row, col, extra) {
+    var it = where(row, col);
+    Object.keys(extra).forEach(function (k) { it[k] = extra[k]; });
+    it.kind = kind;
+    it.key = [sheet.id, kind, it.letter || "", extra.text || ""].join("|");
+    return it;
+  };
+
+  data.refCells.forEach(function (rc) {
+    if (/\[deleted\]/i.test(rc.text)) {
+      out.push(make("deleted", rc.row, rc.col, {
+        title: "Mentions a tick mark that was deleted",
+        hint: "Rewrite the sentence; the yellow highlight goes away on its own.",
+        text: snippet(rc.text)
+      }));
+    }
+    TickCore.unknownMentions(rc.text, isKnown).forEach(function (L) {
+      out.push(make("unknown", rc.row, rc.col, {
+        letter: L,
+        title: "Mentions tick mark " + TickCore.withCase(L, lowerOn()) + ", which isn't in the legend",
+        hint: "It isn't shown in bold red. Fix the letter, add the tick mark, or ignore this.",
+        text: snippet(rc.text)
+      }));
+    });
+  });
+
+  var mapping = {};
+  entries.forEach(function (e) { mapping[e.letter] = e.letter; });
+  TickCore.orphans(data.ticks, mapping).forEach(function (tk) {
+    out.push(make("orphan", tk.row, tk.col, {
+      letter: tk.letter,
+      title: "Tick mark cell shows " + tk.letter + ", but there's no " + tk.letter + " in the legend",
+      hint: "Place a legend tick mark here instead, or remove it.",
+      text: ""
+    }));
+  });
+
+  entries.forEach(function (e) {
+    if ((data.counts[e.letter] || 0) === 0) {
+      out.push(make("unused", e.row, data.legend.box.columnIndex, {
+        letter: e.letter,
+        title: "Tick mark " + TickCore.withCase(e.letter, lowerOn()) + " is in the legend but not used",
+        hint: "Place it on the work paper, or remove it from the legend.",
+        text: snippet(e.desc)
+      }));
+    }
+  });
+
+  var ignored = {};
+  ignoredList().forEach(function (k) { ignored[k] = true; });
+  return out.filter(function (it) { return !ignored[it.key]; });
+}
+
+function goToIssue(it) {
+  return enqueue(function () {
+    return Excel.run(async function (ctx) {
+      var ws = ctx.workbook.worksheets.getItemOrNullObject(it.sheetId);
+      await ctx.sync();
+      if (ws.isNullObject) throw new UserError("That sheet no longer exists.");
+      ws.activate();
+      ws.getCell(it.row, it.col).select();
+      await ctx.sync();
+    });
+  }).catch(showError);
+}
+
+function removeOrphan(it) {
+  return enqueue(function () {
+    return Excel.run(async function (ctx) {
+      var ws = ctx.workbook.worksheets.getItem(it.sheetId);
+      ws.getCell(it.row, it.col).clear(Excel.ClearApplyTo.contents);
+      await ctx.sync();
+    });
+  }).then(function () { showStatus("Removed the tick mark in " + it.addr + ".", "ok"); return enqueue(refreshUi); }).catch(showError);
+}
+
+function removeUnusedTick(it) {
+  return goToIssue(it).then(function () { return deleteTick(it.letter); });
+}
+
 function refreshUi() {
   if (!$("list")) return Promise.resolve();
   return Excel.run(async function (ctx) {
-    var ws = ctx.workbook.worksheets.getActiveWorksheet();
-    ws.load("name");
+    var active = ctx.workbook.worksheets.getActiveWorksheet();
+    active.load("id,name");
+    var sheets = ctx.workbook.worksheets;
+    sheets.load("items/id,items/name");
     await ctx.sync();
-    var data = await readSheet(ctx, ws);
-    render(ws.name, data);
+    var activeData = null, issues = [];
+    for (var i = 0; i < sheets.items.length; i++) {
+      var s = sheets.items[i];
+      var data = await readSheet(ctx, s);
+      if (s.id === active.id) activeData = data;
+      issues = issues.concat(computeIssues(data, s));
+    }
+    if (!activeData) activeData = await readSheet(ctx, active);
+    // Active sheet first, then the others in tab order.
+    issues.sort(function (a, b) { return (a.sheetId === active.id ? 0 : 1) - (b.sheetId === active.id ? 0 : 1); });
+    render(active.name, activeData, issues);
   });
 }
 
-function render(sheetName, data) {
+function renderIssues(issues) {
+  var box = $("attention");
+  if (!box) return;
+  var list = $("attnList");
+  list.innerHTML = "";
+  $("attnCount").textContent = issues.length ? String(issues.length) : "";
+  $("attnCount").className = "attn-count" + (issues.length ? " on" : "");
+  $("attnEmpty").style.display = issues.length ? "none" : "block";
+  issues.slice(0, 100).forEach(function (it) {
+    var row = document.createElement("div");
+    row.className = "issue " + it.kind;
+    var head = document.createElement("div");
+    head.className = "issue-title";
+    head.textContent = it.title;
+    row.appendChild(head);
+    var loc = document.createElement("div");
+    loc.className = "issue-where";
+    loc.textContent = it.sheetName + "!" + it.addr + (it.text ? " — “" + it.text + "”" : "");
+    row.appendChild(loc);
+    var hint = document.createElement("div");
+    hint.className = "issue-hint";
+    hint.textContent = it.hint;
+    row.appendChild(hint);
+    var btns = document.createElement("div");
+    btns.className = "issue-btns";
+    btns.appendChild(button("Go to " + it.addr, "Select this cell", function () { goToIssue(it); }));
+    if (it.kind === "orphan") btns.appendChild(button("Remove", "Clear this tick mark cell", function () { removeOrphan(it); }));
+    if (it.kind === "unused") btns.appendChild(button("Remove from legend", "Delete this tick mark and re-letter", function () { removeUnusedTick(it); }));
+    if (it.kind === "unknown" || it.kind === "unused") btns.appendChild(button("Ignore", "Hide this from the list", function () { ignoreIssue(it); }));
+    row.appendChild(btns);
+    list.appendChild(row);
+  });
+  if (issues.length > 100) {
+    var more = document.createElement("div");
+    more.className = "sub";
+    more.textContent = "And " + (issues.length - 100) + " more.";
+    list.appendChild(more);
+  }
+}
+
+function render(sheetName, data, issues) {
+  renderIssues(issues || []);
   $("sheetName").textContent = "Sheet: " + sheetName;
   var list = $("list");
   list.innerHTML = "";
@@ -846,19 +1019,6 @@ function render(sheetName, data) {
     list.appendChild(row);
   });
 
-  var mapping = {};
-  entries.forEach(function (e) { mapping[e.letter] = e.letter; });
-  var orphans = TickCore.orphans(data.ticks, mapping);
-  var w = $("warnings");
-  if (orphans.length) {
-    w.style.display = "block";
-    w.textContent = "These tick mark cells use a letter that isn't in the legend: " +
-      orphans.slice(0, 10).map(function (t) { return TickCore.cellAddress(t.row, t.col) + " (" + t.letter + ")"; }).join(", ") +
-      (orphans.length > 10 ? " and " + (orphans.length - 10) + " more" : "") +
-      ". Change them to a legend letter or remove them.";
-  } else {
-    w.style.display = "none";
-  }
 }
 
 function button(text, title, onclick, disabled) {

@@ -283,6 +283,48 @@
     return spans.sort(function (a, b) { return a[0] - b[0]; });
   }
 
+  /**
+   * Mentions of tick marks that are NOT in the legend, e.g. "TM D" or "{d}" when there is no D.
+   * Looser than the re-lettering rules, but skips ordinary words: after "tick mark"/"TM" a bare
+   * single letter (not the article "a") or two capitals count; "{x}" always counts.
+   * Returns the unknown letters (upper case, no repeats).
+   */
+  function unknownMentions(text, known) {
+    if (typeof text !== "string" || !text) return [];
+    var found = {}, out = [];
+    var add = function (raw) {
+      var L = raw.toUpperCase();
+      if (!known(L) && !found[L]) { found[L] = true; out.push(L); }
+    };
+    var loose = function (i) {
+      var rest = text.slice(i);
+      var b = BRACED_RE.exec(rest);
+      if (b) return { raw: b[1], end: i + b[0].length };
+      var w = BARE_RE.exec(rest);
+      if (!w) return null;
+      var raw = w[1];
+      if ((raw.length === 1 && raw !== "a") || (raw.length === 2 && raw === raw.toUpperCase())) return { raw: raw, end: i + raw.length };
+      return null;
+    };
+    var m;
+    PREFIX_RE.lastIndex = 0;
+    while ((m = PREFIX_RE.exec(text))) {
+      var i = m.index + m[0].length;
+      var tok = loose(i), end = i;
+      while (tok) {
+        add(tok.raw);
+        end = tok.end;
+        var sep = SEP_RE.exec(text.slice(end));
+        if (!sep) break;
+        tok = loose(end + sep[0].length);
+      }
+      PREFIX_RE.lastIndex = Math.max(PREFIX_RE.lastIndex, end);
+    }
+    ANY_BRACED_RE.lastIndex = 0;
+    while ((m = ANY_BRACED_RE.exec(text))) add(m[1]);
+    return out;
+  }
+
   /** Split text into runs: [{ text, ref: true|false }] using the spans above. */
   function textRuns(text, spans) {
     var out = [], last = 0;
@@ -301,7 +343,7 @@
     for (var r = 0; r < values.length; r++) {
       for (var c = 0; c < values[r].length; c++) {
         var v = values[r][c];
-        if (typeof v !== "string" || v.length < 3 || !/tick|tm|\{/i.test(v)) continue;
+        if (typeof v !== "string" || v.length < 3 || !/tick|tm|\{|deleted\]/i.test(v)) continue;
         var f = formulas && formulas[r] ? formulas[r][c] : "";
         if (typeof f === "string" && f.charAt(0) === "=") continue;
         var row = rowIndex + r, col = columnIndex + c;
@@ -451,7 +493,8 @@
     findRefCells: findRefCells,
     countReferences: countReferences,
     referenceSpans: referenceSpans,
-    textRuns: textRuns
+    textRuns: textRuns,
+    unknownMentions: unknownMentions
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = TickCore;

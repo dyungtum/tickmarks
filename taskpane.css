@@ -30,3 +30,15 @@ button.primary:hover { background: #a30000; }
 .jump { display: flex; flex-wrap: wrap; gap: 6px; }
 .jump button { flex: 1; font-weight: 600; }
 .jump .sub { flex-basis: 100%; }
+.attn-count { display: none; margin-left: 6px; background: #b35c00; color: #fff; border-radius: 9px; padding: 0 7px; font-size: 11px; letter-spacing: 0; }
+.attn-count.on { display: inline-block; }
+#attnList { max-height: 320px; overflow: auto; }
+.issue { border-left: 3px solid #f0a020; background: #fffaf0; padding: 7px 9px; margin-bottom: 6px; border-radius: 0 3px 3px 0; }
+.issue.deleted { border-left-color: #e0c000; background: #fffde6; }
+.issue.orphan { border-left-color: #C00000; background: #fff3f3; }
+.issue.unused { border-left-color: #999; background: #f7f7f7; }
+.issue-title { font-weight: 600; font-size: 12.5px; }
+.issue-where { font-size: 11.5px; color: #555; margin-top: 2px; word-break: break-word; }
+.issue-hint { font-size: 11.5px; color: #777; margin-top: 2px; }
+.issue-btns { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.issue-btns button { padding: 3px 8px; font-size: 12px; }

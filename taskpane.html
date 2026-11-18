@@ -21,6 +21,12 @@
     <div id="sheetName" class="sub"></div>
   </header>
 
+  <section id="attention">
+    <h2>Needs attention <span id="attnCount" class="attn-count"></span></h2>
+    <div id="attnEmpty" class="sub">Nothing to check. Every tick mark and mention lines up with its legend.</div>
+    <div id="attnList"></div>
+  </section>
+
   <section>
     <label for="newDesc">New tick mark</label>
     <input id="newDesc" type="text" placeholder="Description, e.g. Agreed to invoice">
@@ -31,7 +37,6 @@
     <h2>Legend for this sheet</h2>
     <div id="list"></div>
     <div id="empty" class="sub">No tick marks on this sheet yet. Select a cell, type a description above and click Add.</div>
-    <div id="warnings"></div>
   </section>
 
   <section class="jump">
