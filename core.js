@@ -246,6 +246,55 @@
     return { text: out + text.slice(last), changed: true, deleted: deleted };
   }
 
+  /**
+   * Character ranges to show bold red: each whole mention ("TM {c}", "tick marks A and B", "{B}",
+   * "tick mark [deleted]"). known(letter) decides which letters are real tick marks.
+   */
+  var DELETED_RE = /^\[deleted\]/i;
+  function referenceSpans(text, known) {
+    if (typeof text !== "string" || !text) return [];
+    var spans = [];
+    var m;
+    var readAny = function (i) {
+      var d = DELETED_RE.exec(text.slice(i));
+      if (d) return { start: i, end: i + d[0].length, deleted: true };
+      var t = readLetter(text, i, known);
+      return t && known(t.raw.toUpperCase()) ? t : null;
+    };
+    PREFIX_RE.lastIndex = 0;
+    while ((m = PREFIX_RE.exec(text))) {
+      var i = m.index + m[0].length;
+      var tok = readAny(i), end = -1;
+      while (tok) {
+        end = tok.end;
+        var sep = SEP_RE.exec(text.slice(end));
+        if (!sep) break;
+        tok = readAny(end + sep[0].length);
+      }
+      if (end > 0) spans.push([m.index, end]);
+      PREFIX_RE.lastIndex = Math.max(PREFIX_RE.lastIndex, end > 0 ? end : i);
+    }
+    ANY_BRACED_RE.lastIndex = 0;
+    while ((m = ANY_BRACED_RE.exec(text))) {
+      var s0 = m.index, e0 = s0 + m[0].length;
+      if (!known(m[1].toUpperCase())) continue;
+      if (!spans.some(function (sp) { return s0 < sp[1] && sp[0] < e0; })) spans.push([s0, e0]);
+    }
+    return spans.sort(function (a, b) { return a[0] - b[0]; });
+  }
+
+  /** Split text into runs: [{ text, ref: true|false }] using the spans above. */
+  function textRuns(text, spans) {
+    var out = [], last = 0;
+    spans.forEach(function (sp) {
+      if (sp[0] > last) out.push({ text: text.slice(last, sp[0]), ref: false });
+      out.push({ text: text.slice(sp[0], sp[1]), ref: true });
+      last = sp[1];
+    });
+    if (last < text.length) out.push({ text: text.slice(last), ref: false });
+    return out;
+  }
+
   /** Text cells that might contain references (formulas and the legend are skipped). */
   function findRefCells(values, formulas, rowIndex, columnIndex, legendBox) {
     var out = [];
@@ -388,7 +437,9 @@
     findReferences: findReferences,
     remapReferences: remapReferences,
     findRefCells: findRefCells,
-    countReferences: countReferences
+    countReferences: countReferences,
+    referenceSpans: referenceSpans,
+    textRuns: textRuns
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = TickCore;

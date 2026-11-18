@@ -72,7 +72,7 @@ function recordAllSheets() {
     var fix = [];
     for (var i = 0; i < sheets.items.length; i++) {
       var data = await recordState(ctx, sheets.items[i], sheets.items[i].id);
-      if (needsFix(data)) fix.push(sheets.items[i].id);
+      if (data.legend) fix.push(sheets.items[i].id); // tidy up + format mentions
     }
     return fix;
   }).then(async function (fix) {
@@ -234,18 +234,83 @@ function applyChanges(ws, data, plan, legendPos) {
     }
   });
   data.broken.forEach(function (b) { ws.getCell(b.row, b.col).clear(Excel.ClearApplyTo.contents); });
+}
 
-  // Paragraphs that mention tick marks ("see tick mark B", "TM {b}").
+/*
+ * Paragraphs that mention tick marks ("see tick mark B", "TM {b}"):
+ *  - re-letter the mentions (mapping old -> new, null = deleted -> "[deleted]" + yellow cell)
+ *  - show each mention in bold red, the rest of the text unchanged (needs ExcelApi 1.18)
+ * Returns how many cells had their text changed.
+ */
+async function updateMentions(ctx, ws, refCells, mapping, letters) {
+  var known = {};
+  letters.forEach(function (l) { known[l] = true; });
+  var isKnown = function (l) { return !!known[l]; };
+  var rich = Office.context.requirements.isSetSupported("ExcelApi", "1.18");
+  var items = [];
+  refCells.forEach(function (rc) {
+    var r = mapping ? TickCore.remapReferences(rc.text, mapping) : { text: rc.text, changed: false, deleted: false };
+    var spans = TickCore.referenceSpans(r.text, isKnown);
+    if (!r.changed && !spans.length) return;
+    items.push({ r: r, spans: spans, cell: ws.getCell(rc.row, rc.col) });
+  });
+  if (!items.length) return 0;
+  if (rich) {
+    items.forEach(function (it) {
+      if (it.spans.length) it.props = it.cell.getCellProperties({ textRuns: true, format: { font: { bold: true, color: true } } });
+    });
+    await ctx.sync();
+  }
   var n = 0;
-  data.refCells.forEach(function (rc) {
-    var r = TickCore.remapReferences(rc.text, mapping);
-    if (!r.changed) return;
-    var cell = ws.getCell(rc.row, rc.col);
-    cell.values = [[r.text]];
-    if (r.deleted) cell.format.fill.color = DELETED_FILL;
-    n++;
+  items.forEach(function (it) {
+    if (it.r.deleted) it.cell.format.fill.color = DELETED_FILL;
+    if (it.r.changed) n++;
+    if (rich && it.spans.length) {
+      var cur = it.props.value[0][0];
+      var want = TickCore.textRuns(it.r.text, it.spans);
+      if (!it.r.changed && runsMatch(cur.textRuns, want)) return;
+      var base = plainFont(cur);
+      it.cell.setCellProperties([[{
+        textRuns: want.map(function (w) {
+          return { text: w.text, font: w.ref ? { bold: true, color: TICK_COLOR } : base };
+        })
+      }]]);
+    } else if (it.r.changed) {
+      it.cell.values = [[it.r.text]];
+    }
   });
   return n;
+}
+
+function isRefFont(f) {
+  return !!(f && f.bold && typeof f.color === "string" && f.color.toUpperCase() === TICK_COLOR);
+}
+
+/* Does the cell already show exactly these mentions in bold red? */
+function runsMatch(curRuns, want) {
+  if (!curRuns || !curRuns.length) return false;
+  var merged = [];
+  curRuns.forEach(function (r) {
+    var ref = isRefFont(r.font);
+    var last = merged[merged.length - 1];
+    if (last && last.ref === ref) last.text += r.text; else merged.push({ text: r.text, ref: ref });
+  });
+  merged = merged.filter(function (m) { return m.text !== ""; });
+  if (merged.length !== want.length) return false;
+  return merged.every(function (m, i) { return m.text === want[i].text && m.ref === want[i].ref; });
+}
+
+/* Font for the ordinary text around a mention: keep what the cell already uses. */
+function plainFont(cur) {
+  var runs = cur.textRuns || [];
+  for (var i = 0; i < runs.length; i++) {
+    if (runs[i].font && !isRefFont(runs[i].font)) {
+      return { bold: !!runs[i].font.bold, color: runs[i].font.color || "#000000" };
+    }
+  }
+  var f = cur.format && cur.format.font;
+  if (f && !isRefFont(f) && f.color) return { bold: !!f.bold, color: f.color };
+  return { bold: false, color: "#000000" };
 }
 
 /* Where a new legend goes: two rows below everything on the sheet (and below minRow). */
@@ -327,7 +392,8 @@ async function applyOrder(ctx, ws, data, kept, deleted) {
       "). Fix or remove those cells, then try again.");
   }
   var pos = legendPosOf(data);
-  plan.refsUpdated = applyChanges(ws, data, plan, pos);
+  applyChanges(ws, data, plan, pos);
+  plan.refsUpdated = await updateMentions(ctx, ws, data.refCells, plan.mapping, plan.newEntries.map(function (e) { return e.letter; }));
   await writeLegend(ctx, ws, data.legend ? data.legend.box : null, plan.newEntries, pos);
   return plan;
 }
@@ -359,7 +425,8 @@ function autoSync(id) {
       } else {
         await ensureStyle(ctx);
         var pos = legendPosOf(data);
-        var nRefs = applyChanges(ws, data, plan, pos);
+        applyChanges(ws, data, plan, pos);
+        var nRefs = await updateMentions(ctx, ws, data.refCells, plan.mapping, plan.newEntries.map(function (e) { return e.letter; }));
         await writeLegend(ctx, ws, data.legend.box, plan.newEntries, pos);
         if (plan.changed) {
           var removed = entries.filter(function (e) { return plan.mapping[e.letter] === null; }).map(function (e) { return e.letter; });
@@ -369,6 +436,10 @@ function autoSync(id) {
             : "Re-lettered tick marks.") + refsNote(nRefs), "ok");
         }
       }
+    }
+    else {
+      // Nothing to re-letter: just make sure every mention is bold red (e.g. one just typed).
+      await updateMentions(ctx, ws, data.refCells, null, entries.map(function (e) { return e.letter; }));
     }
     await recordState(ctx, ws, id);
   });
@@ -460,6 +531,7 @@ function addTick(desc) {
       pos = await defaultLegendPos(ctx, ws, selBottom);
     }
     applyChanges(ws, data, plan, pos);
+    await updateMentions(ctx, ws, data.refCells, plan.mapping, plan.newEntries.map(function (e) { return e.letter; }));
     await writeLegend(ctx, ws, data.legend ? data.legend.box : null, plan.newEntries, pos);
     var idx = plan.newEntries.length - 1;
     fillAreas(await selectionAreas(ctx), TickCore.refFormula(pos.row + 1 + idx, pos.col));
