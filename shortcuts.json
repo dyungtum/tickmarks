@@ -4,7 +4,7 @@
     { "id": "GoBack", "type": "ExecuteFunction", "name": "Back to tick mark" }
   ],
   "shortcuts": [
-    { "action": "GoToLegend", "key": { "default": "Ctrl+Alt+[" } },
-    { "action": "GoBack", "key": { "default": "Ctrl+Alt+]" } }
+    { "action": "GoToLegend", "key": { "default": "Alt+Shift+G" } },
+    { "action": "GoBack", "key": { "default": "Alt+Shift+B" } }
   ]
 }

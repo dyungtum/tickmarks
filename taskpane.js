@@ -617,7 +617,7 @@ function goBack() {
   }).then(function (msg) { showStatus(msg, "ok"); }).catch(showError);
 }
 
-/* Keyboard shortcuts (Ctrl+Alt+[ and Ctrl+Alt+]) declared in shortcuts.json. */
+/* Keyboard shortcuts (Alt+Shift+G and Alt+Shift+B) declared in shortcuts.json. */
 function registerShortcuts() {
   try {
     if (Office.actions && Office.actions.associate) {
