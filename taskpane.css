@@ -1,0 +1,29 @@
+body { font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px; color: #222; margin: 0; padding: 12px 14px 24px; }
+h1 { font-size: 18px; margin: 0; font-weight: 600; }
+h2 { font-size: 13px; margin: 0 0 6px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #555; }
+header { margin-bottom: 14px; }
+section { margin-bottom: 16px; }
+label { display: block; font-weight: 600; margin-bottom: 4px; }
+.sub { color: #666; font-size: 12px; }
+input[type=text], .entry input { width: 100%; box-sizing: border-box; padding: 5px 6px; border: 1px solid #bbb; border-radius: 3px; font: inherit; }
+button { font: inherit; padding: 5px 9px; border: 1px solid #bbb; background: #fff; border-radius: 3px; cursor: pointer; }
+button:hover:not(:disabled) { background: #f2f2f2; }
+button:disabled { opacity: .4; cursor: default; }
+button.primary { margin-top: 6px; width: 100%; background: #C00000; color: #fff; border-color: #C00000; font-weight: 600; }
+button.primary:hover { background: #a30000; }
+.tools button { display: block; width: 100%; text-align: left; margin-bottom: 5px; }
+.entry { display: flex; gap: 8px; align-items: flex-start; padding: 7px 0; border-bottom: 1px solid #eee; }
+.entry.unused .badge { background: #999; }
+.entry.unused .count { color: #b35c00; }
+.badge { flex: none; min-width: 26px; height: 26px; line-height: 26px; text-align: center; border-radius: 4px; background: #C00000; color: #fff; font-weight: 700; }
+.mid { flex: 1; min-width: 0; }
+.count { font-size: 11px; color: #777; margin-top: 2px; }
+.btns { display: flex; gap: 3px; flex: none; }
+.btns button { padding: 4px 6px; }
+.btns .del { color: #C00000; }
+.toggle { font-weight: normal; display: flex; gap: 6px; align-items: flex-start; margin-bottom: 12px; }
+#warnings { display: none; margin-top: 8px; padding: 8px; background: #fff4e5; border: 1px solid #f0c27a; border-radius: 3px; font-size: 12px; }
+#status { font-size: 12px; min-height: 16px; }
+#status.ok { color: #0a7d32; }
+#status.warn { color: #b35c00; }
+#status.error { color: #C00000; }

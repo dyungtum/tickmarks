@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=Edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tick Marks</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <link rel="stylesheet" href="taskpane.css">
+  <script src="core.js"></script>
+  <script src="taskpane.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Tick Marks</h1>
+    <div id="sheetName" class="sub"></div>
+  </header>
+
+  <section>
+    <label for="newDesc">New tick mark</label>
+    <input id="newDesc" type="text" placeholder="Description, e.g. Agreed to invoice">
+    <button id="addBtn" class="primary">Add &amp; place in selected cells</button>
+  </section>
+
+  <section>
+    <h2>Legend for this sheet</h2>
+    <div id="list"></div>
+    <div id="empty" class="sub">No tick marks on this sheet yet. Select a cell, type a description above and click Add.</div>
+    <div id="warnings"></div>
+  </section>
+
+  <section class="tools">
+    <button id="removeSelBtn">Remove tick marks from selected cells</button>
+    <button id="byPosBtn">Re-letter in the order they appear</button>
+    <button id="unusedBtn">Remove unused tick marks</button>
+    <button id="moveLegendBtn">Move legend to selected cell</button>
+    <button id="refreshBtn">Refresh</button>
+  </section>
+
+  <label class="toggle">
+    <input type="checkbox" id="autoChk">
+    Automatically re-letter when a tick mark is no longer used anywhere on the sheet
+  </label>
+
+  <label class="toggle">
+    <input type="checkbox" id="lowerChk">
+    Use lowercase letters (a, b, c) for new tick marks
+  </label>
+
+  <p class="sub">In your write-ups, refer to tick marks as <b>tick mark A</b>, <b>TM A</b> or <b>{A}</b> (any capitalization). Those mentions update automatically when tick marks are re-lettered.</p>
+
+  <div id="status"></div>
+</body>
+</html>
