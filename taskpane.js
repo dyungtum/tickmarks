@@ -1,7 +1,9 @@
 /*
  * Tick Mark Manager - Excel add-in (task pane + shared runtime).
- * Tick mark cells are tagged with the cell style "Tick Mark".
  * Each worksheet has its own legend, found through the sheet-level name "TickMarkLegend".
+ * A tick mark is a cell whose formula points at its letter in the legend (=$A$14), so Ctrl+[ jumps there.
+ * Placed tick marks also get the cell style "Tick Mark" (red, bold, centered).
+ * Older tick marks that hold a plain letter with the "Tick Mark" style are still supported.
  */
 /* global Office, Excel, TickCore */
 "use strict";
@@ -38,7 +40,11 @@ function autoOn() {
 /* ---------------------------------------------------------------- startup */
 
 Office.onReady(function (info) {
-  if (info.host !== Office.HostType.Excel) return;
+  if (info.host !== Office.HostType.Excel) {
+    var n = document.getElementById("notInExcel");
+    if (n) n.style.display = "block";
+    return;
+  }
   wireUi();
   if (!Office.context.requirements.isSetSupported("ExcelApi", "1.9")) {
     showStatus("This version of Excel is too old for Tick Marks. Please update Excel.", "error");
@@ -83,6 +89,7 @@ function onSheetChanged(evt) {
 /* --------------------------------------------------------- reading a sheet */
 
 async function readSheet(ctx, ws) {
+  ws.load("name");
   var legend = null;
   try {
     var name = ws.names.getItemOrNullObject(LEGEND_NAME);
@@ -96,31 +103,43 @@ async function readSheet(ctx, ws) {
           entries: TickCore.parseLegend(r.values),
           box: { rowIndex: r.rowIndex, columnIndex: r.columnIndex, rowCount: r.rowCount, columnCount: r.columnCount }
         };
+        legend.entries.forEach(function (e) { e.row = r.rowIndex + e.offset; });
       }
     }
   } catch (e) {
     legend = null; // name points at deleted cells (#REF!)
   }
 
-  var ticks = [];
+  var ticks = [], broken = [], refCells = [];
   var used = ws.getUsedRangeOrNullObject(true);
   used.load("values,formulas,rowIndex,columnIndex");
   await ctx.sync();
-  var refCells = [];
   if (!used.isNullObject) {
+    var entryRows = {};
+    if (legend) legend.entries.forEach(function (e) { entryRows[e.row] = e.letter; });
+    var cls = TickCore.classifyCells(used.values, used.formulas, used.rowIndex, used.columnIndex,
+      legend && legend.box, entryRows, ws.name);
     refCells = TickCore.findRefCells(used.values, used.formulas, used.rowIndex, used.columnIndex, legend && legend.box);
-    var cands = TickCore.findCandidates(used.values, used.rowIndex, used.columnIndex, legend && legend.box);
-    var cells = cands.map(function (c) {
+
+    // Style checks: plain letters and #REF! cells only count if they carry the Tick Mark style.
+    var check = cls.consts.concat(cls.refBroken, cls.formulaTicks).map(function (c) {
       var cell = ws.getCell(c.row, c.col);
       cell.load("style");
       return { c: c, cell: cell };
     });
-    if (cells.length) await ctx.sync();
-    cells.forEach(function (x) { if (x.cell.style === STYLE_TICK) ticks.push(x.c); });
+    if (check.length) await ctx.sync();
+    var styled = function (x) { return x.cell.style === STYLE_TICK; };
+    check.forEach(function (x) {
+      x.c.styled = styled(x);
+      if (x.c.formula) ticks.push(x.c);
+      else if (cls.consts.indexOf(x.c) >= 0) { if (x.c.styled) ticks.push(x.c); }
+      else if (x.c.styled) broken.push(x.c); // =#REF! tick mark: its legend row was deleted
+    });
+    broken = broken.concat(cls.blankRefs);  // point at an emptied legend row
   }
   var letters = legend ? legend.entries.map(function (e) { return e.letter; }) : [];
   return {
-    legend: legend, ticks: ticks, counts: TickCore.countTicks(ticks),
+    legend: legend, ticks: ticks, broken: broken, counts: TickCore.countTicks(ticks),
     refCells: refCells, refCounts: TickCore.countReferences(refCells, letters)
   };
 }
@@ -131,6 +150,13 @@ async function recordState(ctx, ws, id) {
     ? { letters: data.legend.entries.map(function (e) { return e.letter; }), counts: data.counts }
     : null;
   return data;
+}
+
+/* True if the legend has gaps, a missing header or stray rows and should be rewritten. */
+function legendUntidy(legend) {
+  if (!legend) return false;
+  return legend.box.rowCount !== legend.entries.length + 1 ||
+    legend.entries.some(function (e, i) { return e.offset !== i + 1; });
 }
 
 /* ----------------------------------------------------------------- writing */
@@ -148,15 +174,31 @@ async function ensureStyle(ctx) {
   }
 }
 
-function applyMappingToCells(ws, data, mapping) {
+/*
+ * Update tick mark cells and text for a re-lettering.
+ * legendPos: {row, col} of the legend header the new legend will be written at.
+ * Formula tick marks are re-pointed at their entry's new legend row; deleted ones are cleared.
+ */
+function applyChanges(ws, data, plan, legendPos) {
+  var mapping = plan.mapping;
+  var newRow = {};
+  plan.newEntries.forEach(function (e, i) { newRow[e.letter] = legendPos ? legendPos.row + 1 + i : null; });
   data.ticks.forEach(function (t) {
-    if (!Object.prototype.hasOwnProperty.call(mapping, t.letter)) return; // not in legend: leave alone
+    if (!Object.prototype.hasOwnProperty.call(mapping, t.letter)) return; // plain letter not in legend: leave alone
     var nl = mapping[t.letter];
-    if (nl === t.letter) return;
     var cell = ws.getCell(t.row, t.col);
-    if (nl === null) cell.clear(Excel.ClearApplyTo.contents);
-    else cell.values = [[TickCore.withCase(nl, t.lower)]];
+    if (nl === null) { cell.clear(Excel.ClearApplyTo.contents); return; }
+    if (t.formula) {
+      if (newRow[nl] !== t.refRow || !t.styled) {
+        if (!t.styled) cell.style = STYLE_TICK;
+        cell.formulas = [[TickCore.refFormula(newRow[nl], legendPos.col)]];
+      }
+    } else if (nl !== t.letter) {
+      cell.values = [[TickCore.withCase(nl, t.lower)]];
+    }
   });
+  data.broken.forEach(function (b) { ws.getCell(b.row, b.col).clear(Excel.ClearApplyTo.contents); });
+
   // Paragraphs that mention tick marks ("see tick mark B", "TM {b}").
   var n = 0;
   data.refCells.forEach(function (rc) {
@@ -170,24 +212,23 @@ function applyMappingToCells(ws, data, mapping) {
   return n;
 }
 
+/* Where a new legend goes: two rows below everything on the sheet (and below minRow). */
+async function defaultLegendPos(ctx, ws, minRow) {
+  var u = ws.getUsedRangeOrNullObject(true);
+  u.load("rowIndex,rowCount,columnIndex");
+  await ctx.sync();
+  var bottom = u.isNullObject ? -1 : u.rowIndex + u.rowCount - 1;
+  if (minRow != null) bottom = Math.max(bottom, minRow);
+  return { row: bottom < 0 ? 0 : bottom + 2, col: u.isNullObject ? 0 : u.columnIndex };
+}
+
 /*
- * Write the legend block (header + one row per tick mark) and point the sheet name at it.
- * oldBox: where the legend is now (null if none). anchor: optional {row, col} to move it to.
+ * Write the legend block (header + one row per tick mark) at pos and point the sheet name at it.
+ * oldBox: where the legend is now when it stays in place (null for a new spot).
  */
-async function writeLegend(ctx, ws, oldBox, entries, anchor) {
-  var row, col, oldRows;
-  if (anchor) {
-    row = anchor.row; col = anchor.col; oldRows = 0;
-  } else if (oldBox) {
-    row = oldBox.rowIndex; col = oldBox.columnIndex; oldRows = oldBox.rowCount;
-  } else {
-    var u = ws.getUsedRangeOrNullObject(true);
-    u.load("rowIndex,rowCount,columnIndex");
-    await ctx.sync();
-    row = u.isNullObject ? 0 : u.rowIndex + u.rowCount + 1;
-    col = u.isNullObject ? 0 : u.columnIndex;
-    oldRows = 0;
-  }
+async function writeLegend(ctx, ws, oldBox, entries, pos) {
+  var row = pos.row, col = pos.col;
+  var oldRows = oldBox ? oldBox.rowCount : 0;
   var newRows = 1 + entries.length;
 
   if (newRows > oldRows) {
@@ -197,7 +238,7 @@ async function writeLegend(ctx, ws, oldBox, entries, anchor) {
     await ctx.sync();
     var busy = extra.values.some(function (r) { return r.some(function (v) { return v !== ""; }); });
     if (busy) {
-      if (anchor) throw new UserError("Pick a spot with " + newRows + " empty rows across 2 columns for the legend.");
+      if (!oldBox) throw new UserError("Pick a spot with " + newRows + " empty rows across 2 columns for the legend.");
       ws.getRangeByIndexes(row + oldRows, 0, newRows - oldRows, 1).getEntireRow().insert(Excel.InsertShiftDirection.down);
     }
   } else if (newRows < oldRows) {
@@ -226,10 +267,16 @@ async function writeLegend(ctx, ws, oldBox, entries, anchor) {
   if (!old.isNullObject) { old.delete(); await ctx.sync(); }
   ws.names.add(LEGEND_NAME, block, "Tick Mark Manager legend - do not delete");
   await ctx.sync();
+  return { row: row, col: col };
+}
+
+function legendPosOf(data) {
+  return data.legend ? { row: data.legend.box.rowIndex, col: data.legend.box.columnIndex } : null;
 }
 
 /* Apply a new legend order. kept: entries in new order (letter null = brand new). */
 async function applyOrder(ctx, ws, data, kept, deleted) {
+  await ensureStyle(ctx);
   var oldEntries = data.legend ? data.legend.entries : [];
   var plan = TickCore.buildPlan(oldEntries, kept, deleted || []);
   var clash = TickCore.orphanCollision(data.ticks, plan.mapping);
@@ -238,8 +285,9 @@ async function applyOrder(ctx, ws, data, kept, deleted) {
       clash.slice(0, 5).map(function (t) { return TickCore.cellAddress(t.row, t.col) + " = " + t.letter; }).join(", ") +
       "). Fix or remove those cells, then try again.");
   }
-  plan.refsUpdated = applyMappingToCells(ws, data, plan.mapping);
-  await writeLegend(ctx, ws, data.legend ? data.legend.box : null, plan.newEntries);
+  var pos = legendPosOf(data);
+  plan.refsUpdated = applyChanges(ws, data, plan, pos);
+  await writeLegend(ctx, ws, data.legend ? data.legend.box : null, plan.newEntries, pos);
   return plan;
 }
 
@@ -264,17 +312,23 @@ function autoSync(id) {
 
     var ap = TickCore.autoPlan(entries, data.counts, prev);
     var plan = TickCore.buildPlan(entries, ap.kept, ap.deleted);
-    if (plan.changed) {
+    var needsFix = data.broken.length > 0 || legendUntidy(data.legend) ||
+      data.ticks.some(function (t) { return t.formula && !t.styled; });
+    if (plan.changed || needsFix) {
       if (TickCore.orphanCollision(data.ticks, plan.mapping).length) {
         showStatus("Tick marks need re-lettering, but some tick cells use letters that aren't in the legend. Open Tick Marks to fix.", "warn");
       } else {
-        var nRefs = applyMappingToCells(ws, data, plan.mapping);
-        await writeLegend(ctx, ws, data.legend.box, plan.newEntries);
-        var removed = entries.filter(function (e) { return plan.mapping[e.letter] === null; }).map(function (e) { return e.letter; });
-        removed = removed.concat(ap.deleted);
-        showStatus((removed.length
-          ? "Removed tick mark " + removed.join(", ") + " and re-lettered the rest."
-          : "Re-lettered tick marks.") + refsNote(nRefs), "ok");
+        await ensureStyle(ctx);
+        var pos = legendPosOf(data);
+        var nRefs = applyChanges(ws, data, plan, pos);
+        await writeLegend(ctx, ws, data.legend.box, plan.newEntries, pos);
+        if (plan.changed) {
+          var removed = entries.filter(function (e) { return plan.mapping[e.letter] === null; }).map(function (e) { return e.letter; });
+          removed = removed.concat(ap.deleted);
+          showStatus((removed.length
+            ? "Removed tick mark " + removed.join(", ") + " and re-lettered the rest."
+            : "Re-lettered tick marks.") + refsNote(nRefs), "ok");
+        }
       }
     }
     await recordState(ctx, ws, id);
@@ -307,25 +361,27 @@ async function selectionAreas(ctx) {
   return sel.areas.items;
 }
 
-async function fillSelection(ctx, letter, legendBox) {
-  letter = TickCore.withCase(letter, lowerOn());
-  var areas = await selectionAreas(ctx);
+function checkAreas(areas, legendBox) {
   var total = areas.reduce(function (n, a) { return n + a.rowCount * a.columnCount; }, 0);
   if (total > MAX_FILL) throw new UserError("Select fewer cells (" + total + " selected).");
   if (legendBox && areas.some(function (a) { return boxesOverlap(a, legendBox); })) {
     throw new UserError("The selection overlaps the legend. Select the cells where the tick mark should go.");
   }
+  return total;
+}
+
+/* Put a tick mark formula (=$A$14) in every selected cell. */
+function fillAreas(areas, formula) {
   areas.forEach(function (a) {
-    var vals = [];
+    var f = [];
     for (var r = 0; r < a.rowCount; r++) {
       var row = [];
-      for (var c = 0; c < a.columnCount; c++) row.push(letter);
-      vals.push(row);
+      for (var c = 0; c < a.columnCount; c++) row.push(formula);
+      f.push(row);
     }
     a.style = STYLE_TICK;
-    a.values = vals;
+    a.formulas = f;
   });
-  return total;
 }
 
 function refsNote(n) {
@@ -345,31 +401,42 @@ function setLoadOnOpen() {
   } catch (e) { /* older Excel: pane must be opened for auto mode */ }
 }
 
+function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
+
 function addTick(desc) {
   return withActiveSheet(async function (ctx, ws, data) {
     await ensureStyle(ctx);
+    var areas = await selectionAreas(ctx);
+    var n = checkAreas(areas, data.legend && data.legend.box);
     var entries = data.legend ? data.legend.entries : [];
-    var kept = entries.concat([{ letter: null, desc: desc }]);
-    var oldEntries = entries;
-    var plan = TickCore.buildPlan(oldEntries, kept, []);
+    var plan = TickCore.buildPlan(entries, entries.concat([{ letter: null, desc: desc }]), []);
     if (TickCore.orphanCollision(data.ticks, plan.mapping).length) {
       throw new UserError("Some tick mark cells use letters that aren't in the legend. Fix those first (see the warning below).");
     }
-    var letter = plan.newEntries[plan.newEntries.length - 1].letter;
-    applyMappingToCells(ws, data, plan.mapping);
-    var n = await fillSelection(ctx, letter, data.legend && data.legend.box);
-    await writeLegend(ctx, ws, data.legend ? data.legend.box : null, plan.newEntries);
+    var pos = legendPosOf(data);
+    if (!pos) {
+      var selBottom = Math.max.apply(null, areas.map(function (a) { return a.rowIndex + a.rowCount - 1; }));
+      pos = await defaultLegendPos(ctx, ws, selBottom);
+    }
+    applyChanges(ws, data, plan, pos);
+    await writeLegend(ctx, ws, data.legend ? data.legend.box : null, plan.newEntries, pos);
+    var idx = plan.newEntries.length - 1;
+    fillAreas(await selectionAreas(ctx), TickCore.refFormula(pos.row + 1 + idx, pos.col));
     setLoadOnOpen();
-    return "Added tick mark " + letter + " to " + n + " cell" + (n === 1 ? "" : "s") + ".";
+    return "Added tick mark " + plan.newEntries[idx].letter + " to " + plural(n, "cell") + ".";
   });
 }
 
 function placeTick(letter) {
   return withActiveSheet(async function (ctx, ws, data) {
     await ensureStyle(ctx);
-    var n = await fillSelection(ctx, letter, data.legend && data.legend.box);
+    var entry = data.legend && data.legend.entries.filter(function (e) { return e.letter === letter; })[0];
+    if (!entry) throw new UserError("Tick mark " + letter + " isn't in the legend.");
+    var areas = await selectionAreas(ctx);
+    var n = checkAreas(areas, data.legend.box);
+    fillAreas(areas, TickCore.refFormula(entry.row, data.legend.box.columnIndex));
     setLoadOnOpen();
-    return "Placed " + letter + " in " + n + " cell" + (n === 1 ? "" : "s") + ".";
+    return "Placed " + letter + " in " + plural(n, "cell") + ".";
   });
 }
 
@@ -382,7 +449,7 @@ function removeFromSelection() {
     if (!hit.length) throw new UserError("No tick marks in the selected cells.");
     hit.forEach(function (t) { ws.getCell(t.row, t.col).clear(Excel.ClearApplyTo.contents); });
     await ctx.sync();
-    var msg = "Removed " + hit.length + " tick mark" + (hit.length === 1 ? "" : "s") + ".";
+    var msg = "Removed " + plural(hit.length, "tick mark") + ".";
     if (!autoOn() || !data.legend) return msg;
     // Drop any tick mark that no longer appears anywhere, then re-letter.
     var after = await readSheet(ctx, ws);
@@ -409,15 +476,15 @@ function moveTick(letter, dir) {
     var j = i + dir;
     if (i < 0 || j < 0 || j >= list.length) return null;
     var tmp = list[i]; list[i] = list[j]; list[j] = tmp;
-    await applyOrder(ctx, ws, data, list, []);
-    return "Re-lettered tick marks.";
+    var plan = await applyOrder(ctx, ws, data, list, []);
+    return "Re-lettered tick marks." + refsNote(plan.refsUpdated);
   });
 }
 
 function editDesc(letter, desc) {
   return withActiveSheet(async function (ctx, ws, data) {
     var list = data.legend.entries.map(function (e) {
-      return e.letter === letter ? { letter: e.letter, desc: desc } : e;
+      return e.letter === letter ? { letter: e.letter, desc: desc, offset: e.offset } : e;
     });
     await applyOrder(ctx, ws, data, list, []);
     return null;
@@ -427,8 +494,8 @@ function editDesc(letter, desc) {
 function reletterByPosition() {
   return withActiveSheet(async function (ctx, ws, data) {
     if (!data.legend) throw new UserError("No tick marks on this sheet.");
-    await applyOrder(ctx, ws, data, TickCore.orderByPosition(data.legend.entries, data.ticks), []);
-    return "Re-lettered in the order they appear (top to bottom, left to right).";
+    var plan = await applyOrder(ctx, ws, data, TickCore.orderByPosition(data.legend.entries, data.ticks), []);
+    return "Re-lettered in the order they appear (top to bottom, left to right)." + refsNote(plan.refsUpdated);
   });
 }
 
@@ -437,31 +504,37 @@ function removeUnused() {
     if (!data.legend) throw new UserError("No tick marks on this sheet.");
     var kept = data.legend.entries.filter(function (e) { return (data.counts[e.letter] || 0) > 0; });
     var n = data.legend.entries.length - kept.length;
-    await applyOrder(ctx, ws, data, kept, []);
-    return n ? "Removed " + n + " unused tick mark" + (n === 1 ? "" : "s") + " and re-lettered." : "Re-lettered. No unused tick marks.";
+    var plan = await applyOrder(ctx, ws, data, kept, []);
+    return (n ? "Removed " + plural(n, "unused tick mark") + " and re-lettered." : "Re-lettered. No unused tick marks.") + refsNote(plan.refsUpdated);
   });
 }
 
 function moveLegend() {
   return withActiveSheet(async function (ctx, ws, data) {
     if (!data.legend) throw new UserError("No legend on this sheet yet.");
+    await ensureStyle(ctx);
     var cell = ctx.workbook.getActiveCell();
     cell.load("rowIndex,columnIndex");
     await ctx.sync();
     var box = data.legend.box;
-    var oldRange = ws.getRangeByIndexes(box.rowIndex, box.columnIndex, box.rowCount, Math.max(2, box.columnCount));
-    oldRange.clear(Excel.ClearApplyTo.all);
+    ws.getRangeByIndexes(box.rowIndex, box.columnIndex, box.rowCount, Math.max(2, box.columnCount)).clear(Excel.ClearApplyTo.all);
     await ctx.sync();
-    // Keep the current letters: moving the legend never re-letters anything.
-    var entries = data.legend.entries.map(function (e) { return { letter: e.letter, desc: e.desc }; });
+    // Same letters, new spot: every tick mark formula is re-pointed at the moved legend.
+    var entries = data.legend.entries;
+    var plan = TickCore.buildPlan(entries, entries, []);
+    var pos = { row: cell.rowIndex, col: cell.columnIndex };
+    var err = null;
     try {
-      await writeLegend(ctx, ws, null, entries, { row: cell.rowIndex, col: cell.columnIndex });
+      await writeLegend(ctx, ws, null, plan.newEntries, pos);
     } catch (e) {
-      // New spot isn't empty: put the legend back where it was (those cells are empty now).
-      await writeLegend(ctx, ws, null, entries, { row: box.rowIndex, col: box.columnIndex });
-      throw e;
+      err = e; // new spot isn't empty: put it back where it was (those cells are empty now)
+      pos = { row: box.rowIndex, col: box.columnIndex };
+      await writeLegend(ctx, ws, null, plan.newEntries, pos);
     }
-    return "Moved the legend.";
+    data.ticks.forEach(function (t) { t.refRow = -1; }); // force every formula to be rewritten
+    applyChanges(ws, data, plan, pos);
+    if (err) throw err;
+    return "Moved the legend. Tick marks still point to it.";
   });
 }
 

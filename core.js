@@ -38,7 +38,7 @@
       if (seen[letter]) continue;
       seen[letter] = true;
       var desc = values[r].length > 1 && values[r][1] != null ? String(values[r][1]) : "";
-      entries.push({ letter: letter, desc: desc });
+      entries.push({ letter: letter, desc: desc, offset: r });
     }
     return entries;
   }
@@ -276,6 +276,69 @@
     return counts;
   }
 
+  /* ------------------------------------- tick marks as legend formulas */
+
+  function colIndex(letters) {
+    var n = 0;
+    letters = letters.toUpperCase();
+    for (var i = 0; i < letters.length; i++) n = n * 26 + (letters.charCodeAt(i) - 64);
+    return n - 1;
+  }
+
+  // =A14, =$A$14, =Sheet1!$A$14, ='Cash Disb'!A14
+  var REF_RE = /^=\s*(?:(?:'((?:[^']|'')+)'|([A-Za-z0-9_.]+))!)?\$?([A-Za-z]{1,3})\$?(\d+)\s*$/;
+
+  /** A formula that is just one reference to a cell on this sheet -> {row, col}; otherwise null. */
+  function parseRef(formula, sheetName) {
+    if (typeof formula !== "string") return null;
+    var m = REF_RE.exec(formula);
+    if (!m) return null;
+    var sh = m[1] != null ? m[1].replace(/''/g, "'") : m[2];
+    if (sh && sheetName && sh.toLowerCase() !== String(sheetName).toLowerCase()) return null;
+    return { row: parseInt(m[4], 10) - 1, col: colIndex(m[3]) };
+  }
+
+  /** The formula a tick mark cell gets: an absolute reference to its letter in the legend. */
+  function refFormula(row, col) {
+    return "=$" + letterFor(col) + "$" + (row + 1);
+  }
+
+  /**
+   * Sort the used range into:
+   *  consts       - cells holding a plain letter (need a style check to count as tick marks)
+   *  formulaTicks - cells whose formula points at a letter in the legend (=$A$14) -> tick marks
+   *  refBroken    - cells showing =#REF! (a tick mark whose legend row was deleted, if styled)
+   *  blankRefs    - formulas pointing at an empty row inside the legend
+   * entryRows: { rowIndex: letter } for legend rows that hold a tick mark.
+   */
+  function classifyCells(values, formulas, rowIndex, columnIndex, legendBox, entryRows, sheetName) {
+    var out = { consts: [], formulaTicks: [], refBroken: [], blankRefs: [] };
+    for (var r = 0; r < values.length; r++) {
+      for (var c = 0; c < values[r].length; c++) {
+        var row = rowIndex + r, col = columnIndex + c;
+        if (legendBox && inBox(row, col, legendBox)) continue;
+        var v = values[r][c];
+        var f = formulas && formulas[r] ? formulas[r][c] : v;
+        if (typeof f === "string" && f.charAt(0) === "=") {
+          if (/^=\s*#REF!\s*$/i.test(f)) { out.refBroken.push({ row: row, col: col }); continue; }
+          var ref = parseRef(f, sheetName);
+          if (ref && legendBox && ref.col === legendBox.columnIndex &&
+              ref.row > legendBox.rowIndex && ref.row < legendBox.rowIndex + legendBox.rowCount) {
+            var L = entryRows[ref.row];
+            if (L) out.formulaTicks.push({ row: row, col: col, letter: L, refRow: ref.row, formula: true });
+            else out.blankRefs.push({ row: row, col: col });
+          }
+          continue;
+        }
+        if (isTickText(v)) {
+          var t = v.trim();
+          out.consts.push({ row: row, col: col, letter: t.toUpperCase(), lower: t === t.toLowerCase() });
+        }
+      }
+    }
+    return out;
+  }
+
   /** "A1"-style address from zero-based indexes. */
   function cellAddress(row, col) {
     return letterFor(col) + (row + 1);
@@ -297,6 +360,10 @@
     remapCounts: remapCounts,
     orderByPosition: orderByPosition,
     cellAddress: cellAddress,
+    colIndex: colIndex,
+    parseRef: parseRef,
+    refFormula: refFormula,
+    classifyCells: classifyCells,
     withCase: withCase,
     findReferences: findReferences,
     remapReferences: remapReferences,
