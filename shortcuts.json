@@ -1,0 +1,10 @@
+{
+  "actions": [
+    { "id": "GoToLegend", "type": "ExecuteFunction", "name": "Go to tick mark legend" },
+    { "id": "GoBack", "type": "ExecuteFunction", "name": "Back to tick mark" }
+  ],
+  "shortcuts": [
+    { "action": "GoToLegend", "key": { "default": "Ctrl+Alt+[" } },
+    { "action": "GoBack", "key": { "default": "Ctrl+Alt+]" } }
+  ]
+}

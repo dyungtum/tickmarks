@@ -27,3 +27,6 @@ button.primary:hover { background: #a30000; }
 #status.ok { color: #0a7d32; }
 #status.warn { color: #b35c00; }
 #status.error { color: #C00000; }
+.jump { display: flex; flex-wrap: wrap; gap: 6px; }
+.jump button { flex: 1; font-weight: 600; }
+.jump .sub { flex-basis: 100%; }

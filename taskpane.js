@@ -46,6 +46,7 @@ Office.onReady(function (info) {
     return;
   }
   wireUi();
+  registerShortcuts();
   if (!Office.context.requirements.isSetSupported("ExcelApi", "1.9")) {
     showStatus("This version of Excel is too old for Tick Marks. Please update Excel.", "error");
     return;
@@ -563,6 +564,54 @@ function moveLegend() {
   });
 }
 
+/* ------------------------------------------- jump to the legend and back */
+
+var lastJump = null; // { sheetId, row, col } of the cell we jumped from
+
+/* Like Excel's Ctrl+[ (which Excel on the web doesn't support): go to the cell a formula points at. */
+function goToLegend() {
+  return enqueue(function () {
+    return Excel.run(async function (ctx) {
+      var ws = ctx.workbook.worksheets.getActiveWorksheet();
+      ws.load("id,name");
+      var cell = ctx.workbook.getActiveCell();
+      cell.load("formulas,rowIndex,columnIndex");
+      await ctx.sync();
+      var ref = TickCore.parseRef(cell.formulas[0][0], ws.name);
+      if (!ref) throw new UserError("Select a tick mark (a cell with a formula like =$B$19) first.");
+      lastJump = { sheetId: ws.id, row: cell.rowIndex, col: cell.columnIndex };
+      ws.getCell(ref.row, ref.col).select();
+      await ctx.sync();
+      return "Jumped to " + TickCore.cellAddress(ref.row, ref.col) + ". Use Back to return.";
+    });
+  }).then(function (msg) { showStatus(msg, "ok"); }).catch(showError);
+}
+
+function goBack() {
+  return enqueue(function () {
+    return Excel.run(async function (ctx) {
+      if (!lastJump) throw new UserError("Nothing to go back to yet.");
+      var ws = ctx.workbook.worksheets.getItemOrNullObject(lastJump.sheetId);
+      await ctx.sync();
+      if (ws.isNullObject) throw new UserError("That sheet no longer exists.");
+      ws.activate();
+      ws.getCell(lastJump.row, lastJump.col).select();
+      await ctx.sync();
+      return "Back at " + TickCore.cellAddress(lastJump.row, lastJump.col) + ".";
+    });
+  }).then(function (msg) { showStatus(msg, "ok"); }).catch(showError);
+}
+
+/* Keyboard shortcuts (Ctrl+Alt+[ and Ctrl+Alt+]) declared in shortcuts.json. */
+function registerShortcuts() {
+  try {
+    if (Office.actions && Office.actions.associate) {
+      Office.actions.associate("GoToLegend", function () { return goToLegend(); });
+      Office.actions.associate("GoBack", function () { return goBack(); });
+    }
+  } catch (e) { /* older Excel: buttons in the pane still work */ }
+}
+
 /* --------------------------------------------------------------------- UI */
 
 function $(id) { return document.getElementById(id); }
@@ -576,6 +625,8 @@ function wireUi() {
   };
   $("newDesc").onkeydown = function (e) { if (e.key === "Enter") $("addBtn").click(); };
   $("removeSelBtn").onclick = removeFromSelection;
+  if ($("jumpBtn")) $("jumpBtn").onclick = goToLegend;
+  if ($("backBtn")) $("backBtn").onclick = goBack;
   $("byPosBtn").onclick = reletterByPosition;
   $("unusedBtn").onclick = removeUnused;
   $("moveLegendBtn").onclick = moveLegend;
